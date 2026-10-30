@@ -1,0 +1,82 @@
+
+trigger:
+  - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+
+# -----------------------
+# CI - BUILD JAVA APP
+# -----------------------
+- stage: Build
+  displayName: 'Build Java Application'
+
+  jobs:
+  - job: BuildJob
+    displayName: 'Maven Build'
+
+    steps:
+    - task: Maven@4
+      displayName: 'Build using Maven'
+      inputs:
+        mavenPomFile: 'pom.xml'
+        goals: 'clean package'
+        publishJUnitResults: true
+        testResultsFiles: '**/surefire-reports/TEST-*.xml'
+        javaHomeOption: 'JDKVersion'
+        jdkVersionOption: '1.17'
+
+    - task: CopyFiles@2
+      displayName: 'Copy JAR file'
+      inputs:
+        SourceFolder: '$(System.DefaultWorkingDirectory)/target'
+        Contents: '*.jar'
+        TargetFolder: '$(Build.ArtifactStagingDirectory)/drop'
+
+    - task: PublishPipelineArtifact@1
+      displayName: 'Publish Build Artifact'
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)/drop'
+        artifact: 'java-app'
+
+# -----------------------
+# CD - DEPLOY TO AZURE VM
+# -----------------------
+- stage: Deploy
+  displayName: 'Deploy to Azure VM'
+  dependsOn: Build
+
+  jobs:
+  - job: DeployJob
+    displayName: 'Deploy Java Application'
+
+    steps:
+    - task: DownloadPipelineArtifact@2
+      displayName: 'Download Build Artifact'
+      inputs:
+        buildType: 'current'
+        artifactName: 'java-app'
+        targetPath: '$(Pipeline.Workspace)/drop'
+
+    - task: CopyFilesOverSSH@0
+      displayName: 'Copy JAR to Azure VM'
+      inputs:
+        sshEndpoint: 'azure-vm-ssh'
+        sourceFolder: '$(Pipeline.Workspace)/drop'
+        contents: '*.jar'
+        targetFolder: '/home/azureuser/app'
+        overwrite: true
+
+    - task: SSH@0
+      displayName: 'Restart Java Application'
+      inputs:
+        sshEndpoint: 'azure-vm-ssh'
+        runOptions: 'commands'
+        commands: |
+          JAR=$(find /home/azureuser/app -maxdepth 1 -name '*.jar' | head -n 1)
+          test -n "$JAR" || exit 1
+          cp "$JAR" /home/azureuser/app/app.jar
+          sudo /usr/bin/systemctl restart myjavaapp
+          sudo /usr/bin/systemctl is-active myjavaapp
